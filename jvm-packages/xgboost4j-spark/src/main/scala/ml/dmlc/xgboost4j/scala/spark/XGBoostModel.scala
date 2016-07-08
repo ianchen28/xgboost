@@ -18,15 +18,16 @@ package ml.dmlc.xgboost4j.scala.spark
 
 import org.apache.hadoop.fs.{Path, FileSystem}
 import org.apache.spark.{TaskContext, SparkContext}
-import org.apache.spark.mllib.linalg.Vector
+import org.apache.spark.mllib.linalg.{DenseVector, Vector}
 import org.apache.spark.rdd.RDD
 import ml.dmlc.xgboost4j.java.{DMatrix => JDMatrix}
 import ml.dmlc.xgboost4j.scala.{DMatrix, Booster}
 
-class XGBoostModel(_booster: Booster)(implicit val sc: SparkContext) extends Serializable {
+class XGBoostModel(_booster: Booster) extends Serializable {
 
   /**
    * Predict result with the given testset (represented as RDD)
+   *
    * @param testSet test set representd as RDD
    * @param useExternalCache whether to use external cache for the test set
    */
@@ -52,6 +53,31 @@ class XGBoostModel(_booster: Booster)(implicit val sc: SparkContext) extends Ser
   }
 
   /**
+   * Predict result with the given testset (represented as RDD)
+   * @param testSet test set representd as RDD
+   * @param missingValue the specified value to represent the missing value
+   */
+  def predict(testSet: RDD[DenseVector], missingValue: Float): RDD[Array[Array[Float]]] = {
+    val broadcastBooster = testSet.sparkContext.broadcast(_booster)
+    testSet.mapPartitions { testSamples =>
+      val sampleArray = testSamples.toList
+      val numRows = sampleArray.size
+      val numColumns = sampleArray.head.size
+      if (numRows == 0) {
+        Iterator()
+      } else {
+        // translate to required format
+        val flatSampleArray = new Array[Float](numRows * numColumns)
+        for (i <- flatSampleArray.indices) {
+          flatSampleArray(i) = sampleArray(i / numColumns).values(i % numColumns).toFloat
+        }
+        val dMatrix = new DMatrix(flatSampleArray, numRows, numColumns, missingValue)
+        Iterator(broadcastBooster.value.predict(dMatrix))
+      }
+    }
+  }
+
+  /**
    * predict result given the test data (represented as DMatrix)
    */
   def predict(testSet: DMatrix): Array[Array[Float]] = {
@@ -63,7 +89,7 @@ class XGBoostModel(_booster: Booster)(implicit val sc: SparkContext) extends Ser
    *
    * @param modelPath The model path as in Hadoop path.
    */
-  def saveModelAsHadoopFile(modelPath: String): Unit = {
+  def saveModelAsHadoopFile(modelPath: String)(implicit sc: SparkContext): Unit = {
     val path = new Path(modelPath)
     val outputStream = path.getFileSystem(sc.hadoopConfiguration).create(path)
     _booster.saveModel(outputStream)
